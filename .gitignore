@@ -1,0 +1,28 @@
+﻿# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Local databases and generated vector stores
+backend/data/chroma_db/
+backend/instance/
+*.sqlite
+*.db
+
+# Editor and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
