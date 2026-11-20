@@ -19,8 +19,7 @@ EMBEDDING_MODEL = "models/gemini-embedding-001"
 EMBEDDING_DIMENSION = 768
 EMBEDDING_BATCH_SIZE = 16
 
-# Keep below the Gemini free-tier limit of 100 embedding requests/minute.
-# Each batch contains up to 16 individual embedding requests.
+# 16 embedding requests every 12 seconds = approximately 80/minute.
 BATCH_DELAY_SECONDS = 12
 
 MAX_RETRIES = 6
@@ -136,7 +135,8 @@ def embed_texts(
     texts: list[str],
     task_type: str,
     title: str = ""
-):
+) -> list[list[float]]:
+
     if not settings.llm_api_key:
         raise RuntimeError("Gemini API key is not configured.")
 
@@ -194,11 +194,16 @@ def embed_texts(
             all_vectors.append(normalize_vector(values))
 
         print(
-            f"Embedding batch {batch_number}/{total_batches} completed."
+            f"Embedding batch {batch_number}/{total_batches} "
+            f"completed ({len(all_vectors)}/{len(texts)} chunks)."
         )
 
-        # Pace requests to stay below the free-tier quota.
+        # This delay now works across the complete document.
         if batch_number < total_batches:
+            print(
+                f"Waiting {BATCH_DELAY_SECONDS} seconds "
+                "before the next embedding batch..."
+            )
             time.sleep(BATCH_DELAY_SECONDS)
 
     return all_vectors
@@ -211,35 +216,50 @@ def add_chunks(chunks: list[dict]):
 
     collection = get_collection()
 
-    for start in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
+    # IMPORTANT:
+    # Pass ALL chunks together so embed_texts controls
+    # batching, delays and retry handling.
+    texts = [
+        item["text"]
+        for item in chunks
+    ]
 
-        batch = chunks[start:start + EMBEDDING_BATCH_SIZE]
+    title = chunks[0]["metadata"].get("title", "")
 
-        texts = [
-            item["text"]
-            for item in batch
-        ]
+    print(
+        f"Starting embedding for {len(chunks)} chunks "
+        f"across "
+        f"{math.ceil(len(chunks) / EMBEDDING_BATCH_SIZE)} batches."
+    )
 
-        title = batch[0]["metadata"].get("title", "")
+    vectors = embed_texts(
+        texts,
+        task_type="RETRIEVAL_DOCUMENT",
+        title=title
+    )
 
-        vectors = embed_texts(
-            texts,
-            task_type="RETRIEVAL_DOCUMENT",
-            title=title
+    if len(vectors) != len(chunks):
+        raise RuntimeError(
+            "Embedding count does not match the document chunk count."
         )
 
-        collection.upsert(
-            ids=[
-                item["id"]
-                for item in batch
-            ],
-            documents=texts,
-            metadatas=[
-                item["metadata"]
-                for item in batch
-            ],
-            embeddings=vectors
-        )
+    # Store the document chunks after all embeddings succeed.
+    collection.upsert(
+        ids=[
+            item["id"]
+            for item in chunks
+        ],
+        documents=texts,
+        metadatas=[
+            item["metadata"]
+            for item in chunks
+        ],
+        embeddings=vectors
+    )
+
+    print(
+        f"Successfully stored {len(chunks)} chunks in ChromaDB."
+    )
 
 
 def query_chunks(
