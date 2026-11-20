@@ -1,4 +1,5 @@
 
+import logging
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -12,6 +13,8 @@ from app.services.document_service import (
 )
 from app.services.vector_store import collection_count
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -90,12 +93,20 @@ async def upload_document(file: UploadFile = File(...)):
         raise
 
     except ValueError as exc:
+        logger.exception(
+            "PDF validation or processing failed: %s",
+            file.filename,
+        )
         raise HTTPException(
             status_code=422,
             detail=str(exc),
         ) from exc
 
     except Exception as exc:
+        logger.exception(
+            "Unexpected document processing failure: %s",
+            file.filename,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Document processing failed: {type(exc).__name__}",
