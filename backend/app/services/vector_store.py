@@ -1,6 +1,8 @@
 
 import json
 import math
+import re
+import time
 import urllib.request
 import urllib.error
 from functools import lru_cache
@@ -16,6 +18,13 @@ COLLECTION = "college_documents_gemini"
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 EMBEDDING_DIMENSION = 768
 EMBEDDING_BATCH_SIZE = 16
+
+# Keep below the Gemini free-tier limit of 100 embedding requests/minute.
+# Each batch contains up to 16 individual embedding requests.
+BATCH_DELAY_SECONDS = 12
+
+MAX_RETRIES = 6
+MAX_RETRY_DELAY_SECONDS = 60
 
 
 @lru_cache(maxsize=1)
@@ -42,6 +51,87 @@ def normalize_vector(vector):
     return [value / norm for value in vector]
 
 
+def get_retry_delay(details: str, attempt: int) -> float:
+    """Read Gemini's suggested retry delay, with exponential backoff."""
+
+    match = re.search(
+        r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"',
+        details
+    )
+
+    if match:
+        delay = float(match.group(1))
+    else:
+        delay = 2 ** attempt
+
+    return min(max(delay, 5), MAX_RETRY_DELAY_SECONDS)
+
+
+def embed_batch(requests: list[dict]) -> list[dict]:
+    """Send one embedding batch and retry temporary quota errors."""
+
+    payload = {"requests": requests}
+
+    request = urllib.request.Request(
+        (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            "models/gemini-embedding-001:batchEmbedContents"
+        ),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": settings.llm_api_key
+        },
+        method="POST"
+    )
+
+    for attempt in range(MAX_RETRIES):
+
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=60
+            ) as response:
+
+                data = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+                return data.get("embeddings", [])
+
+        except urllib.error.HTTPError as exc:
+
+            details = exc.read().decode(
+                "utf-8",
+                errors="replace"
+            )
+
+            if exc.code == 429 and attempt < MAX_RETRIES - 1:
+
+                delay = get_retry_delay(details, attempt)
+
+                print(
+                    f"Gemini quota limit reached. "
+                    f"Retrying in {delay:.1f} seconds "
+                    f"(attempt {attempt + 1}/{MAX_RETRIES - 1})."
+                )
+
+                time.sleep(delay)
+                continue
+
+            raise RuntimeError(
+                f"Gemini Embeddings HTTP {exc.code}: {details}"
+            ) from exc
+
+        except urllib.error.URLError as exc:
+
+            raise RuntimeError(
+                f"Gemini Embeddings connection failed: {exc.reason}"
+            ) from exc
+
+    raise RuntimeError("Gemini embedding retries exhausted.")
+
+
 def embed_texts(
     texts: list[str],
     task_type: str,
@@ -55,7 +145,14 @@ def embed_texts(
 
     all_vectors = []
 
-    for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+    total_batches = math.ceil(
+        len(texts) / EMBEDDING_BATCH_SIZE
+    )
+
+    for batch_number, start in enumerate(
+        range(0, len(texts), EMBEDDING_BATCH_SIZE),
+        start=1
+    ):
 
         batch = texts[start:start + EMBEDDING_BATCH_SIZE]
         requests = []
@@ -65,9 +162,7 @@ def embed_texts(
             item = {
                 "model": EMBEDDING_MODEL,
                 "content": {
-                    "parts": [
-                        {"text": text}
-                    ]
+                    "parts": [{"text": text}]
                 },
                 "taskType": task_type,
                 "outputDimensionality": EMBEDDING_DIMENSION
@@ -78,51 +173,7 @@ def embed_texts(
 
             requests.append(item)
 
-        payload = {
-            "requests": requests
-        }
-
-        request = urllib.request.Request(
-            (
-                "https://generativelanguage.googleapis.com/v1beta/"
-                "models/gemini-embedding-001:batchEmbedContents"
-            ),
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": settings.llm_api_key
-            },
-            method="POST"
-        )
-
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=60
-            ) as response:
-
-                data = json.loads(
-                    response.read().decode("utf-8")
-                )
-
-        except urllib.error.HTTPError as exc:
-
-            details = exc.read().decode(
-                "utf-8",
-                errors="replace"
-            )
-
-            raise RuntimeError(
-                f"Gemini Embeddings HTTP {exc.code}: {details}"
-            ) from exc
-
-        except urllib.error.URLError as exc:
-
-            raise RuntimeError(
-                f"Gemini Embeddings connection failed: {exc.reason}"
-            ) from exc
-
-        embeddings = data.get("embeddings", [])
+        embeddings = embed_batch(requests)
 
         if len(embeddings) != len(batch):
             raise RuntimeError(
@@ -140,9 +191,15 @@ def embed_texts(
                     f"received {len(values)}."
                 )
 
-            all_vectors.append(
-                normalize_vector(values)
-            )
+            all_vectors.append(normalize_vector(values))
+
+        print(
+            f"Embedding batch {batch_number}/{total_batches} completed."
+        )
+
+        # Pace requests to stay below the free-tier quota.
+        if batch_number < total_batches:
+            time.sleep(BATCH_DELAY_SECONDS)
 
     return all_vectors
 
