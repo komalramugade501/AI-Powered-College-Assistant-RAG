@@ -17,6 +17,9 @@ export const metadata: Metadata = {
   title: "AI_POWERED COLLEGE ASSISTANT USING RAG",
   description:
     "A multilingual AI-powered college assistant using Retrieval-Augmented Generation (RAG) to provide grounded answers from college documents.",
+  verification: {
+    google: "KEjDvkxd3k1doeVhm9-0KzqMcOZvDKxe5jpdVicF3xQ",
+  },
 };
 
 export default function RootLayout({
